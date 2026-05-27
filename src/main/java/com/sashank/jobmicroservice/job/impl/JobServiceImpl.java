@@ -5,10 +5,14 @@ import com.sashank.jobmicroservice.job.JobRepository;
 import com.sashank.jobmicroservice.job.JobService;
 import com.sashank.jobmicroservice.job.dto.JobWithCompanyDTO;
 import com.sashank.jobmicroservice.job.external.Company;
+import com.sashank.jobmicroservice.job.mapper.JobMapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.client.RestClientException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -16,12 +20,18 @@ import java.util.Optional;
 
 @Service
 public class JobServiceImpl implements JobService {
-//    private List<Job> jobs=new ArrayList<>();
+    private static final Logger logger = LoggerFactory.getLogger(JobServiceImpl.class);
+    
     JobRepository jobrepository;
     
-    @Value("${company.service.url:http://localhost:8081}")
+    @Autowired
+    RestTemplate restTemplate;
+    
+    @Autowired
+    JobMapper jobMapper;
+
+    @Value("${company.service.url:http://COMPANY-MICROSERVICE}")
     private String companyServiceUrl;
-//    private Long nextId=1L;
 
     public JobServiceImpl(JobRepository jobrepository) {
         this.jobrepository = jobrepository;
@@ -29,32 +39,97 @@ public class JobServiceImpl implements JobService {
 
     @Override
     public List<JobWithCompanyDTO> findAll() {
-        List<Job> jobs = jobrepository.findAll();
-        List<JobWithCompanyDTO> jobWithCompanyDTOS = new ArrayList<>();
-        
+        logger.info("Finding all jobs");
         try {
-            RestTemplate restTemplate = new RestTemplate();
+            List<Job> jobs = jobrepository.findAll();
+            logger.info("Found {} jobs in database", jobs.size());
+            List<JobWithCompanyDTO> jobWithCompanyDTOS = new ArrayList<>();
+            
             for(Job job: jobs){
-                Company company = restTemplate.getForObject(companyServiceUrl + "/companies/" + job.getCompanyId(), Company.class);
-                jobWithCompanyDTOS.add(convertToDto(job, company));
+                try {
+                    JobWithCompanyDTO dto = convertToDto(job);
+                    if (dto != null) {
+                        jobWithCompanyDTOS.add(dto);
+                    }
+                } catch (Exception e) {
+                    logger.error("Error converting job {} to DTO, skipping", job.getId(), e);
+                }
             }
-        } catch (RestClientException e) {
-            System.err.println("Warning: Could not fetch company data from " + companyServiceUrl);
-            System.err.println("Error: " + e.getMessage());
-            // Continue execution even if company service is unavailable
-            // Return jobs without company data
-            for(Job job: jobs){
-                jobWithCompanyDTOS.add(convertToDto(job, null));
-            }
+            logger.info("Successfully converted {} jobs to DTOs", jobWithCompanyDTOS.size());
+            return jobWithCompanyDTOS;
+        } catch (Exception e) {
+            logger.error("Error retrieving all jobs", e);
+            throw new RuntimeException("Failed to retrieve jobs: " + e.getMessage(), e);
         }
-        return jobWithCompanyDTOS;
     }
 
-    private JobWithCompanyDTO convertToDto(Job job, Company company) {
-        JobWithCompanyDTO jobWithCompanyDTO = new JobWithCompanyDTO();
-        jobWithCompanyDTO.setJob(job);
-        jobWithCompanyDTO.setCompany(company);
-        return jobWithCompanyDTO;
+    private JobWithCompanyDTO convertToDto(Job job) {
+        if (job == null) {
+            logger.warn("Job object is null");
+            return null;
+        }
+        
+        logger.info("Converting Job {} to JobWithCompanyDTO", job.getId());
+        
+        Company company = null;
+        if (job.getCompanyId() != null) {
+            company = fetchCompanyWithRetry(job.getCompanyId(), 3);
+        } else {
+            logger.warn("Job {} has no companyId", job.getId());
+        }
+        
+        try {
+            // Use JobMapper to convert Job and Company to JobWithCompanyDTO
+            JobWithCompanyDTO dto = jobMapper.jobToJobWithCompanyDTO(job, company);
+            logger.info("Successfully converted Job {} to DTO", job.getId());
+            return dto;
+        } catch (Exception e) {
+            logger.error("Error during mapping Job {} to DTO", job.getId(), e);
+            throw new RuntimeException("Failed to convert Job to DTO: " + e.getMessage(), e);
+        }
+    }
+    
+    private Company fetchCompanyWithRetry(Long companyId, int maxAttempts) {
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                String url = companyServiceUrl + "/companies/" + companyId;
+                logger.info("[Attempt {}/{}] Fetching company from URL: {}", attempt, maxAttempts, url);
+                
+                Company company = restTemplate.getForObject(url, Company.class);
+                
+                if (company != null) {
+                    logger.info("✓ Successfully fetched company: {} - {}", company.getId(), company.getName());
+                    return company;
+                } else {
+                    logger.warn("[Attempt {}/{}] Company returned null from URL: {}", attempt, maxAttempts, url);
+                }
+            } catch (RestClientException e) {
+                logger.error("[Attempt {}/{}] RestClientException for companyId {}: {}", 
+                    attempt, maxAttempts, companyId, e.getMessage());
+                
+                if (attempt < maxAttempts) {
+                    try {
+                        logger.info("Waiting 1 second before retry...");
+                        Thread.sleep(1000); // Wait 1 second before retry
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            } catch (Exception e) {
+                logger.error("[Attempt {}/{}] Unexpected exception for companyId {}", attempt, maxAttempts, companyId, e);
+                
+                if (attempt < maxAttempts) {
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+        }
+        
+        logger.error("✗ Failed to fetch company {} after {} attempts", companyId, maxAttempts);
+        return null;
     }
 
     @Override
@@ -66,15 +141,21 @@ public class JobServiceImpl implements JobService {
     }
 
     @Override
-    public Job getJobById(Long id) {
-//        for(Job job: jobs){
-//            if(job.getId().equals(id)){
-//                return  job;
-//            }
-//        }
-//        return null;
-
-        return jobrepository.findById(id).orElse(null);
+    public JobWithCompanyDTO getJobById(Long id) {
+        logger.info("Getting job by id: {}", id);
+        try {
+            Optional<Job> jobOptional = jobrepository.findById(id);
+            if(jobOptional.isPresent()) {
+                logger.info("Job found with id: {}", id);
+                return convertToDto(jobOptional.get());
+            } else {
+                logger.warn("Job not found with id: {}", id);
+                return null;
+            }
+        } catch (Exception e) {
+            logger.error("Error retrieving job with id: {}", id, e);
+            throw new RuntimeException("Failed to retrieve job: " + e.getMessage(), e);
+        }
     }
 
     @Override
