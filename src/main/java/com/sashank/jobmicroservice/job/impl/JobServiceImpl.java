@@ -3,8 +3,14 @@ package com.sashank.jobmicroservice.job.impl;
 import com.sashank.jobmicroservice.job.Job;
 import com.sashank.jobmicroservice.job.JobRepository;
 import com.sashank.jobmicroservice.job.JobService;
+import com.sashank.jobmicroservice.job.dto.JobWithCompanyDTO;
+import com.sashank.jobmicroservice.job.external.Company;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.RestClientException;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -12,6 +18,9 @@ import java.util.Optional;
 public class JobServiceImpl implements JobService {
 //    private List<Job> jobs=new ArrayList<>();
     JobRepository jobrepository;
+    
+    @Value("${company.service.url:http://localhost:8081}")
+    private String companyServiceUrl;
 //    private Long nextId=1L;
 
     public JobServiceImpl(JobRepository jobrepository) {
@@ -19,9 +28,33 @@ public class JobServiceImpl implements JobService {
     }
 
     @Override
-    public List<Job> findAll() {
+    public List<JobWithCompanyDTO> findAll() {
+        List<Job> jobs = jobrepository.findAll();
+        List<JobWithCompanyDTO> jobWithCompanyDTOS = new ArrayList<>();
+        
+        try {
+            RestTemplate restTemplate = new RestTemplate();
+            for(Job job: jobs){
+                Company company = restTemplate.getForObject(companyServiceUrl + "/companies/" + job.getCompanyId(), Company.class);
+                jobWithCompanyDTOS.add(convertToDto(job, company));
+            }
+        } catch (RestClientException e) {
+            System.err.println("Warning: Could not fetch company data from " + companyServiceUrl);
+            System.err.println("Error: " + e.getMessage());
+            // Continue execution even if company service is unavailable
+            // Return jobs without company data
+            for(Job job: jobs){
+                jobWithCompanyDTOS.add(convertToDto(job, null));
+            }
+        }
+        return jobWithCompanyDTOS;
+    }
 
-        return jobrepository.findAll();
+    private JobWithCompanyDTO convertToDto(Job job, Company company) {
+        JobWithCompanyDTO jobWithCompanyDTO = new JobWithCompanyDTO();
+        jobWithCompanyDTO.setJob(job);
+        jobWithCompanyDTO.setCompany(company);
+        return jobWithCompanyDTO;
     }
 
     @Override

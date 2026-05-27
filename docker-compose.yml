@@ -1,0 +1,41 @@
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: job_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: saso@2005
+      POSTGRES_DB: jobdb
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - job-network
+
+  job-microservice:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: job-microservice
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/jobdb
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: saso@2005
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      COMPANY_SERVICE_URL: http://company-microservice:8081
+    ports:
+      - "8082:8082"
+    depends_on:
+      - postgres
+    networks:
+      - job-network
+
+volumes:
+  postgres_data:
+
+networks:
+  job-network:
+    driver: bridge
+
