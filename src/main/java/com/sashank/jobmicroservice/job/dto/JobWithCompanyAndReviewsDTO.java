@@ -4,7 +4,7 @@ import com.sashank.jobmicroservice.job.Job;
 import com.sashank.jobmicroservice.job.external.Company;
 import java.util.List;
 
-public class JobWithCompanyDTO {
+public class JobWithCompanyAndReviewsDTO {
     private Long id;
     private String title;
     private String description;
@@ -16,9 +16,8 @@ public class JobWithCompanyDTO {
     private List<ReviewDTO> reviews;
 
     // Default constructor
-    public JobWithCompanyDTO() {
+    public JobWithCompanyAndReviewsDTO() {
     }
-
 
     // Getters and Setters
     public Long getId() {
@@ -93,3 +92,4 @@ public class JobWithCompanyDTO {
         this.reviews = reviews;
     }
 }
+

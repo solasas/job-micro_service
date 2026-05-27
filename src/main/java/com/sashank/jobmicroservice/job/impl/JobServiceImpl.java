@@ -4,6 +4,8 @@ import com.sashank.jobmicroservice.job.Job;
 import com.sashank.jobmicroservice.job.JobRepository;
 import com.sashank.jobmicroservice.job.JobService;
 import com.sashank.jobmicroservice.job.dto.JobWithCompanyDTO;
+import com.sashank.jobmicroservice.job.dto.JobWithCompanyAndReviewsDTO;
+import com.sashank.jobmicroservice.job.dto.ReviewDTO;
 import com.sashank.jobmicroservice.job.external.Company;
 import com.sashank.jobmicroservice.job.mapper.JobMapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,6 +19,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Arrays;
 
 @Service
 public class JobServiceImpl implements JobService {
@@ -32,6 +35,9 @@ public class JobServiceImpl implements JobService {
 
     @Value("${company.service.url:http://COMPANY-MICROSERVICE}")
     private String companyServiceUrl;
+    
+    @Value("${review.service.url:http://REVIEW-MICROSERVICE}")
+    private String reviewServiceUrl;
 
     public JobServiceImpl(JobRepository jobrepository) {
         this.jobrepository = jobrepository;
@@ -39,7 +45,7 @@ public class JobServiceImpl implements JobService {
 
     @Override
     public List<JobWithCompanyDTO> findAll() {
-        logger.info("Finding all jobs");
+        logger.info("Finding all jobs with company and reviews");
         try {
             List<Job> jobs = jobrepository.findAll();
             logger.info("Found {} jobs in database", jobs.size());
@@ -49,13 +55,19 @@ public class JobServiceImpl implements JobService {
                 try {
                     JobWithCompanyDTO dto = convertToDto(job);
                     if (dto != null) {
+                        // Fetch and attach reviews
+                        if (dto.getCompanyId() != null) {
+                            List<ReviewDTO> reviews = fetchReviewsForCompany(dto.getCompanyId());
+                            dto.setReviews(reviews);
+                            logger.info("Attached {} reviews to job {}", reviews.size(), job.getId());
+                        }
                         jobWithCompanyDTOS.add(dto);
                     }
                 } catch (Exception e) {
                     logger.error("Error converting job {} to DTO, skipping", job.getId(), e);
                 }
             }
-            logger.info("Successfully converted {} jobs to DTOs", jobWithCompanyDTOS.size());
+            logger.info("Successfully converted {} jobs to DTOs with reviews", jobWithCompanyDTOS.size());
             return jobWithCompanyDTOS;
         } catch (Exception e) {
             logger.error("Error retrieving all jobs", e);
@@ -142,12 +154,19 @@ public class JobServiceImpl implements JobService {
 
     @Override
     public JobWithCompanyDTO getJobById(Long id) {
-        logger.info("Getting job by id: {}", id);
+        logger.info("Getting job by id: {} with company and reviews", id);
         try {
             Optional<Job> jobOptional = jobrepository.findById(id);
             if(jobOptional.isPresent()) {
                 logger.info("Job found with id: {}", id);
-                return convertToDto(jobOptional.get());
+                JobWithCompanyDTO dto = convertToDto(jobOptional.get());
+                if (dto != null && dto.getCompanyId() != null) {
+                    // Fetch and attach reviews
+                    List<ReviewDTO> reviews = fetchReviewsForCompany(dto.getCompanyId());
+                    dto.setReviews(reviews);
+                    logger.info("Attached {} reviews to job {}", reviews.size(), id);
+                }
+                return dto;
             } else {
                 logger.warn("Job not found with id: {}", id);
                 return null;
@@ -207,6 +226,48 @@ public class JobServiceImpl implements JobService {
         }
 
         return false;
+    }
+    
+    public List<ReviewDTO> fetchReviewsForCompany(Long companyId) {
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                String url = reviewServiceUrl + "/reviews?companyId=" + companyId;
+                logger.info("[Review Attempt {}/3] Fetching reviews from URL: {}", attempt, url);
+                
+                ReviewDTO[] reviews = restTemplate.getForObject(url, ReviewDTO[].class);
+                
+                if (reviews != null) {
+                    logger.info("✓ Successfully fetched {} reviews for company: {}", reviews.length, companyId);
+                    return Arrays.asList(reviews);
+                } else {
+                    logger.warn("[Review Attempt {}/3] Reviews returned null from URL", attempt);
+                }
+            } catch (RestClientException e) {
+                logger.error("[Review Attempt {}/3] RestClientException for companyId {}: {}", 
+                    attempt, companyId, e.getMessage());
+                
+                if (attempt < 3) {
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            } catch (Exception e) {
+                logger.error("[Review Attempt {}/3] Unexpected exception for companyId {}", attempt, companyId, e);
+                
+                if (attempt < 3) {
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+        }
+        
+        logger.warn("✗ Failed to fetch reviews for company {} after 3 attempts, returning empty list", companyId);
+        return new ArrayList<>();
     }
 
 }
