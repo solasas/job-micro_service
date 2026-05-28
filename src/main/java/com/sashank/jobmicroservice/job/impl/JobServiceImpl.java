@@ -1,5 +1,4 @@
 package com.sashank.jobmicroservice.job.impl;
-
 import com.sashank.jobmicroservice.job.Job;
 import com.sashank.jobmicroservice.job.JobRepository;
 import com.sashank.jobmicroservice.job.JobService;
@@ -7,6 +6,8 @@ import com.sashank.jobmicroservice.job.dto.JobWithCompanyDTO;
 import com.sashank.jobmicroservice.job.dto.JobWithCompanyAndReviewsDTO;
 import com.sashank.jobmicroservice.job.dto.ReviewDTO;
 import com.sashank.jobmicroservice.job.external.Company;
+import com.sashank.jobmicroservice.job.clients.CompanyClient;
+import com.sashank.jobmicroservice.job.clients.ReviewClient;
 import com.sashank.jobmicroservice.job.mapper.JobMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -32,14 +33,16 @@ public class JobServiceImpl implements JobService {
     
     @Autowired
     JobMapper jobMapper;
-
-    @Value("${company.service.url:http://COMPANY-MICROSERVICE}")
-    private String companyServiceUrl;
     
-    @Value("${review.service.url:http://REVIEW-MICROSERVICE}")
-    private String reviewServiceUrl;
+    @Autowired
+    CompanyClient companyClient;
+    
+    @Autowired
+    ReviewClient reviewClient;
 
-    public JobServiceImpl(JobRepository jobrepository) {
+    public JobServiceImpl(JobRepository jobrepository,CompanyClient companyClient, ReviewClient reviewClient) {
+        this.companyClient = companyClient;
+        this.reviewClient = reviewClient;
         this.jobrepository = jobrepository;
     }
 
@@ -85,7 +88,16 @@ public class JobServiceImpl implements JobService {
         
         Company company = null;
         if (job.getCompanyId() != null) {
-            company = fetchCompanyWithRetry(job.getCompanyId(), 3);
+            try {
+                logger.info("Fetching company {} using FeignClient", job.getCompanyId());
+                company = companyClient.getCompanyById(job.getCompanyId());
+                if (company != null) {
+                    logger.info("✓ Successfully fetched company: {} - {}", company.getId(), company.getName());
+                }
+            } catch (Exception e) {
+                logger.error("Error fetching company {} using FeignClient: {}", job.getCompanyId(), e.getMessage());
+                company = null;
+            }
         } else {
             logger.warn("Job {} has no companyId", job.getId());
         }
@@ -99,49 +111,6 @@ public class JobServiceImpl implements JobService {
             logger.error("Error during mapping Job {} to DTO", job.getId(), e);
             throw new RuntimeException("Failed to convert Job to DTO: " + e.getMessage(), e);
         }
-    }
-    
-    private Company fetchCompanyWithRetry(Long companyId, int maxAttempts) {
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-                String url = companyServiceUrl + "/companies/" + companyId;
-                logger.info("[Attempt {}/{}] Fetching company from URL: {}", attempt, maxAttempts, url);
-                
-                Company company = restTemplate.getForObject(url, Company.class);
-                
-                if (company != null) {
-                    logger.info("✓ Successfully fetched company: {} - {}", company.getId(), company.getName());
-                    return company;
-                } else {
-                    logger.warn("[Attempt {}/{}] Company returned null from URL: {}", attempt, maxAttempts, url);
-                }
-            } catch (RestClientException e) {
-                logger.error("[Attempt {}/{}] RestClientException for companyId {}: {}", 
-                    attempt, maxAttempts, companyId, e.getMessage());
-                
-                if (attempt < maxAttempts) {
-                    try {
-                        logger.info("Waiting 1 second before retry...");
-                        Thread.sleep(1000); // Wait 1 second before retry
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
-            } catch (Exception e) {
-                logger.error("[Attempt {}/{}] Unexpected exception for companyId {}", attempt, maxAttempts, companyId, e);
-                
-                if (attempt < maxAttempts) {
-                    try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
-            }
-        }
-        
-        logger.error("✗ Failed to fetch company {} after {} attempts", companyId, maxAttempts);
-        return null;
     }
 
     @Override
@@ -231,33 +200,24 @@ public class JobServiceImpl implements JobService {
     public List<ReviewDTO> fetchReviewsForCompany(Long companyId) {
         for (int attempt = 1; attempt <= 3; attempt++) {
             try {
-                String url = reviewServiceUrl + "/reviews?companyId=" + companyId;
-                logger.info("[Review Attempt {}/3] Fetching reviews from URL: {}", attempt, url);
+                logger.info("[Review Attempt {}/3] Fetching reviews for company {} using FeignClient", attempt, companyId);
                 
-                ReviewDTO[] reviews = restTemplate.getForObject(url, ReviewDTO[].class);
+                List<ReviewDTO> reviews = reviewClient.getReviewsByCompanyId(companyId);
                 
-                if (reviews != null) {
-                    logger.info("✓ Successfully fetched {} reviews for company: {}", reviews.length, companyId);
-                    return Arrays.asList(reviews);
+                if (reviews != null && !reviews.isEmpty()) {
+                    logger.info("✓ Successfully fetched {} reviews for company: {} using FeignClient", reviews.size(), companyId);
+                    return reviews;
                 } else {
-                    logger.warn("[Review Attempt {}/3] Reviews returned null from URL", attempt);
+                    logger.warn("[Review Attempt {}/3] No reviews returned for company: {}", attempt, companyId);
+                    return new ArrayList<>();
                 }
-            } catch (RestClientException e) {
-                logger.error("[Review Attempt {}/3] RestClientException for companyId {}: {}", 
+            } catch (Exception e) {
+                logger.error("[Review Attempt {}/3] Exception while fetching reviews for companyId {}: {}", 
                     attempt, companyId, e.getMessage());
                 
                 if (attempt < 3) {
                     try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
-            } catch (Exception e) {
-                logger.error("[Review Attempt {}/3] Unexpected exception for companyId {}", attempt, companyId, e);
-                
-                if (attempt < 3) {
-                    try {
+                        logger.info("Waiting 1 second before retry...");
                         Thread.sleep(1000);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
@@ -266,7 +226,7 @@ public class JobServiceImpl implements JobService {
             }
         }
         
-        logger.warn("✗ Failed to fetch reviews for company {} after 3 attempts, returning empty list", companyId);
+        logger.warn("✗ Failed to fetch reviews for company {} after 3 attempts using FeignClient, returning empty list", companyId);
         return new ArrayList<>();
     }
 
